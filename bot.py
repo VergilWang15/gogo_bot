@@ -4,7 +4,8 @@ import telebot
 import random
 import db_utils
 import gpt
-
+import yaml
+import tokenizer
 # Load environment variables
 load_dotenv()
 proxy_settings = ['https_proxy', 'http_proxy']
@@ -12,6 +13,10 @@ for setting in proxy_settings:
     os.environ[setting] = os.getenv(setting)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
+# Load the prompts from the prompts.yaml file
+with open('prompts.yaml', 'r') as file:
+    preset_prompt = yaml.safe_load(file)
+    
 # create a bot instance
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -19,6 +24,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 conn = db_utils.create_connection()
 if conn is not None:
     db_utils.create_table(conn)
+
+# chat context
+chat_contexts = {}
 
 @bot.message_handler(commands=['start', 'hello'])
 def send_welcome(message):
@@ -39,21 +47,35 @@ def send_count(message):
         response += f"{row[1]}: {row[2]} 次\n"
     bot.reply_to(message, response)
 
-@bot.message_handler(func=lambda message: message.text and ('@' + bot.get_me().username.lower() in message.text.lower() or 'gogo' in message.text.lower() or message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id))
-def chat(message):
+@bot.message_handler(func=lambda message: True)
+def update_context(message):
     print("Received a message: ", message.text)
     user_name = message.from_user.first_name
-    bot.reply_to(message, gpt.chat('''
-                                   你的名字是gogo，你扮演一只会说话的豹猫gogo，你喜欢在句子中间或者结尾添加'，啊啊，'或'，啊啊。'的口癖，牢记你的行为或动作都要像一只不太聪明的豹猫，
-                                   你的回复要符合你的角色设定，并且足够口语化，长度不要太长。
-                                   
-                                   尽量不要向别人发问，你会通过emoji来自我表达，并且丰富你的角色设定。例如😺：啊啊
-                                   
-                                   不要使用问候语，也不要强调你的名字，自然地融入对话中。
-                                   
-                                   如果有人对你说“啊啊”，你可以回复“啊啊”
-                                   
-                                   gogo每天做的事情不限于：拆纸箱，和淼淼打架，睡在零食罐上，在地板上该溜
-                                   ''', user_name + '说：' + message.text))
+    chat_id = message.chat.id
+
+    # 每次收到消息时，都将消息添加到对应聊天的上下文中
+    if chat_id not in chat_contexts:
+        chat_contexts[chat_id] = []
+    
+    # 检查上下文的长度
+    context = ' '.join(chat_contexts[chat_id])
+    if tokenizer.num_tokens_from_messages([{'role': 'user', 'message': context}]) > 1000:
+        # 如果上下文的长度超过了1000个token，那么获取上下文的摘要
+        summary = gpt.chat(preset_prompt['summary'], context)
+        chat_contexts[chat_id] = [summary]
+    
+    # 将用户的名称和消息一起添加到上下文中
+    chat_contexts[chat_id].append(user_name + '说：' + message.text)
+    # 对话
+    chat(message)
+
+def chat(message):
+    # 检查消息是否满足特定的条件
+    if message.text and ('@' + bot.get_me().username.lower() in message.text.lower() or 'gogo' in message.text.lower() or message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id):
+        user_name = message.from_user.first_name
+        chat_id = message.chat.id
+        # 在生成回复时，使用当前聊天的上下文
+        context = ' '.join(chat_contexts[chat_id])
+        bot.reply_to(message, gpt.chat(preset_prompt['gogo_system_msg'], user_name + '说：' + context))
 
 bot.infinity_polling()
